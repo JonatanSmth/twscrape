@@ -48,27 +48,33 @@ def script_url(k: str, v: str):
 
 def get_scripts_list(text: str):
     scripts = text.split('e=>e+"."+')[1].split('[e]+"a.js"')[0]
+
     try:
-        for k, v in json.loads(scripts).items():
-            yield script_url(k, f"{v}a")
-    except json.decoder.JSONDecodeError as e:
-        raise Exception("Failed to parse scripts") from e
+        data = json.loads(scripts)
+
+    except json.decoder.JSONDecodeError:
+        # 🔥 FIX: repair JS-style object keys -> valid JSON
+        fixed_scripts = re.sub(
+            r'([{,]\s*)([a-zA-Z_$][a-zA-Z0-9_$]*)\s*:',
+            r'\1"\2":',
+            scripts
+        )
+
+        try:
+            data = json.loads(fixed_scripts)
+        except json.decoder.JSONDecodeError as e:
+            raise Exception("Failed to parse scripts (even after repair)") from e
+
+    for k, v in data.items():
+        yield script_url(k, f"{v}a")
 
 
 # MARK: XClientTxId parsing
 
-# Code mostly taken from https://github.com/iSarabjitDhiman/XClientTransaction (MIT licensed)
-# Many thanks to @SarabjitDhiman for the original code and investigating the algorithm.
-# Articles with more details:
-# https://antibot.blog/posts/1741552025433
-# https://antibot.blog/posts/1741552092462
-# https://antibot.blog/posts/1741552163416
-
-
 INDICES_REGEX = re.compile(r"(\(\w{1}\[(\d{1,2})\],\s*16\))+", flags=(re.VERBOSE | re.MULTILINE))
 
 
-class Cubic:  # cubic_curve.py
+class Cubic:
     def __init__(self, curves: list[float]):
         self.curves = curves
 
@@ -107,7 +113,7 @@ class Cubic:  # cubic_curve.py
 
 
 def interpolate(from_list: list[float], to_list: list[float], f: float):
-    assert len(from_list) == len(to_list), f"Mismatched interpolation args {from_list}: {to_list}"
+    assert len(from_list) == len(to_list)
     return [a * (1 - f) + b * f for a, b in zip(from_list, to_list)]
 
 
@@ -122,7 +128,6 @@ def solve(value: float, min_val: float, max_val: float, rounding: bool):
 
 
 def float_to_hex(x):
-    # todo: ?
     result = []
     quotient = int(x)
     fraction = x - quotient
@@ -172,17 +177,14 @@ def cacl_anim_key(frames: list[float], target_time: float) -> str:
 
     matrix = get_rotation_matrix(rotation[0])
     str_arr = [format(round(value), "x") for value in color[:-1]]
+
     for value in matrix:
-        rounded = round(value, 2)
-        if rounded < 0:
-            rounded = -rounded
+        rounded = abs(round(value, 2))
         hex_value = float_to_hex(rounded)
         str_arr.append(
             f"0{hex_value}".lower()
             if hex_value.startswith(".")
-            else hex_value
-            if hex_value
-            else "0"
+            else hex_value if hex_value else "0"
         )
 
     str_arr.extend(["0", "0"])
@@ -214,7 +216,6 @@ async def parse_anim_idx(text: str) -> list[int]:
 
 
 def parse_anim_arr(soup: bs4.BeautifulSoup, vk_bytes: list[int]) -> list[list[float]]:
-    # https://github.com/fa0311/twitter-tid-deobf/blob/c4fd61c36/output/a.js#L18
     els = list(soup.select("svg[id^='loading-x-anim'] g:first-child path:nth-child(2)"))
     els = [str(x.get("d") or "").strip() for x in els]
     if not els:
@@ -246,12 +247,11 @@ async def load_keys(soup: bs4.BeautifulSoup) -> tuple[list[int], str]:
 class XClIdGen:
     @staticmethod
     async def create(clt: httpx.AsyncClient | None = None) -> "XClIdGen":
-        text = await get_tw_page_text("https://x.com/tesla", clt=clt)
+        text = await get_tw_page_text("https://x.com/elonmusk", clt=clt)
         soup = bs4.BeautifulSoup(text, "html.parser")
 
         vk_bytes, anim_key = await load_keys(soup)
-        clid_gen = XClIdGen(vk_bytes, anim_key)
-        return clid_gen
+        return XClIdGen(vk_bytes, anim_key)
 
     def __init__(self, vk_bytes: list[int], anim_key: str):
         self.vk_bytes = vk_bytes
@@ -261,34 +261,11 @@ class XClIdGen:
         ts = math.floor((time.time() * 1000 - 1682924400 * 1000) / 1000)
         ts_bytes = [(ts >> (i * 8)) & 0xFF for i in range(4)]
 
-        dkw, drn = "obfiowerehiring", 3  # default keyword and random number
+        dkw, drn = "obfiowerehiring", 3
         pld = f"{method.upper()}!{path}!{ts}{dkw}{self.anim_key}"
         pld = list(hashlib.sha256(pld.encode()).digest())
         pld = [*self.vk_bytes, *ts_bytes, *pld[:16], drn]
 
         num = random.randint(0, 255)
         pld = bytearray([num, *[x ^ num for x in pld]])
-        out = base64.b64encode(pld).decode("utf-8").strip("=")
-        return out
-
-
-# MARK: Demo code
-
-
-async def main():
-    text = await get_tw_page_text("https://x.com/elonmusk")
-    soup = bs4.BeautifulSoup(text, "html.parser")
-
-    vk_bytes, anim_key = await load_keys(soup)
-    clid_gen = XClIdGen(vk_bytes, anim_key)
-
-    method = "GET"
-    path = "/i/api/graphql/AIdc203rPpK_k_2KWSdm7g/SearchTimeline"
-    clid = clid_gen.calc(method, path)
-    print(clid)
-
-
-if __name__ == "__main__":
-    import asyncio
-
-    asyncio.run(main())
+        return base64.b64encode(pld).decode("utf-8").strip("=")
